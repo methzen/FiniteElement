@@ -1,0 +1,104 @@
+! --------------------------------------------------------------------
+! Copyright (C) 1991 - 2019 - EDF R&D - www.code-aster.org
+! This file is part of code_aster.
+!
+! code_aster is free software: you can redistribute it and/or modify
+! it under the terms of the GNU General Public License as published by
+! the Free Software Foundation, either version 3 of the License, or
+! (at your option) any later version.
+!
+! code_aster is distributed in the hope that it will be useful,
+! but WITHOUT ANY WARRANTY; without even the implied warranty of
+! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+! GNU General Public License for more details.
+!
+! You should have received a copy of the GNU General Public License
+! along with code_aster.  If not, see <http://www.gnu.org/licenses/>.
+! --------------------------------------------------------------------
+!
+subroutine sb9GetVoluFromFace(mesh       , valr_pres  , valk_pres,&
+                              nb_all_volu, v_all_volu ,&
+                              nb_face    , v_list_face,&
+                              v_list_volu, &
+                              v_pres_r   , v_pres_k)
+!
+implicit none
+!
+#include "jeveux.h"
+#include "asterf_types.h"
+#include "asterfort/assert.h"
+#include "asterfort/utmess.h"
+#include "asterfort/jexnum.h"
+#include "asterfort/ismember.h"
+#include "asterfort/jeveuo.h"
+#include "asterfort/jenuno.h"
+!
+character(len=8), intent(in) :: mesh
+real(kind=8), intent(in) :: valr_pres
+character(len=8), intent(in) :: valk_pres
+integer, intent(in) :: nb_all_volu
+integer, pointer :: v_all_volu(:)
+integer, intent(in) :: nb_face
+integer, pointer :: v_list_face(:)
+integer, pointer :: v_list_volu(:)
+real(kind=8), pointer :: v_pres_r(:)
+character(len=8), pointer :: v_pres_k(:)
+!
+! ------------------------------------------------------------------------------
+!
+! Get volume from face for SB9 elements
+!
+! ------------------------------------------------------------------------------
+!
+    integer :: i_face, face_curr, ino, i_volu, volu_curr
+    integer :: iatyma, iadtyp
+    character(len=8) :: type_elem, name_elem
+    integer :: node4(4), nodeinf(4), nodesup(4)
+    integer :: jdes1, jdes2
+    aster_logical :: l_inf, l_sup
+!
+! ------------------------------------------------------------------------------
+!
+    call jeveuo(mesh//'.TYPMAIL', 'L', iatyma)
+!
+    do i_face = 1, nb_face
+! ----- Get current face
+        face_curr = v_list_face(i_face)
+        ASSERT(face_curr .gt. 0)
+        iadtyp = iatyma-1+face_curr
+        call jenuno(jexnum('&CATA.TM.NOMTM', zi(iadtyp)), type_elem)
+        print*,'HERE2'
+        if (type_elem .ne. 'QUAD4') then
+        print*,'HERE3'
+            call jenuno(jexnum(mesh//'.NOMMAI', face_curr), name_elem)
+            call utmess('F', 'CHARGES_7', sk = name_elem)
+            print*,'HERE4'
+        endif
+! ----- Get nodes
+        call jeveuo(jexnum(mesh//'.CONNEX', face_curr), 'E', jdes1)
+        do ino = 1, 4
+            node4(ino) = zi(jdes1+ino-1)
+        end do
+! ----- Search volume
+        do i_volu = 1, nb_all_volu
+            volu_curr = v_all_volu(i_volu)
+            call jeveuo(jexnum(mesh//'.CONNEX', volu_curr), 'E', jdes2)
+            do ino = 1, 4
+                nodeinf(ino) = zi(jdes2+ino-1)
+                nodesup(ino) = zi(jdes2+ino-1+4)
+            end do
+            call ismember(node4, nodeinf, l_inf)
+            v_list_volu(i_volu) = volu_curr
+            if (l_inf) then
+                v_pres_r(2*(i_volu-1)+1) = valr_pres
+                v_pres_k(2*(i_volu-1)+1) = valk_pres
+            else
+                call ismember(node4, nodesup, l_sup)
+                if (l_sup) then
+                    v_pres_r(2*(i_volu-1)+2) = valr_pres
+                    v_pres_k(2*(i_volu-1)+2) = valk_pres
+                endif
+            endif
+        end do
+    end do
+end

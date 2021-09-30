@@ -1,0 +1,136 @@
+! --------------------------------------------------------------------
+! Copyright (C) 1991 - 2019 - EDF R&D - www.code-aster.org
+! This file is part of code_aster.
+!
+! code_aster is free software: you can redistribute it and/or modify
+! it under the terms of the GNU General Public License as published by
+! the Free Software Foundation, either version 3 of the License, or
+! (at your option) any later version.
+!
+! code_aster is distributed in the hope that it will be useful,
+! but WITHOUT ANY WARRANTY without even the implied warranty of
+! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+! GNU General Public License for more details.
+!
+! You should have received a copy of the GNU General Public License
+! along with code_aster.  If not, see <http://www.gnu.org/licenses/>.
+! --------------------------------------------------------------------
+!
+subroutine contraintestab(l_large    ,&
+                          nb_node    , nb_dof    ,&
+                          geom_init  , disp       , Ueff,&
+                          BXIdev     , BETAdev   ,&
+                          BETAZETAdev, BXIZETAdev,BXIETAdev,&
+                          SHXI       , SHETA     ,&
+                          SHETAZETA  , SHXIZETA,SHXIETA)
+!
+implicit none
+!
+#include "asterf_types.h"
+#include "asterfort/assert.h"
+#include "asterfort/deformEcartStab.h"
+!
+aster_logical, intent(in) :: l_large
+integer, intent(in) :: nb_node, nb_dof
+real(kind=8), intent(in)  :: geom_init(3*nb_node), disp(nb_dof), Ueff
+real(kind=8), intent(in)  :: BXIdev(6,3*nb_node), BETAdev(6,3*nb_node),BXIETAdev(6,3*nb_node)
+real(kind=8), intent(in)  :: BXIZETAdev(6,3*nb_node), BETAZETAdev(6,3*nb_node)
+real(kind=8), intent(out) :: SHXI(6), SHETA(6), SHETAZETA(6), SHXIZETA(6),SHXIETA(6)
+!
+! --------------------------------------------------------------------------------------------------
+!
+! Solid-shell element
+!
+! Compute stabilisation stresses
+!
+! --------------------------------------------------------------------------------------------------
+!
+! In  l_large          : flag for large strains
+! In  nb_node          : number of nodes of element without pinch node(s)
+! In  nb_dof           : number of dof
+! In  geom_init        : initial coordinates of element
+! In  disp             : displacements of element
+! In  Ueff             : effective shear modulus
+! In  BXIdev           : xi part of gradient matrix (deviatoric part)
+! In  BETAdev          : eta part of gradient matrix (deviatoric part)
+! In  BETAZETAdev      : eta x zeta part of gradient matrix (deviatoric part)
+! In  BXIZETAdev       : xi x zeta part of gradient matrix (deviatoric part)
+! Out SHXI             : stress stabilisation - xi x xi part
+! Out SHETA            : stress stabilisation - eta x eta part
+! Out SHETAZETA        : stress stabilisation - eta x zeta part
+! Out SHXIZETA         : stress stabilisation - xi x zeta part
+!
+! --------------------------------------------------------------------------------------------------
+!
+    real(kind=8) :: aux1, aux2, aux13, aux23
+    real(kind=8) :: EH1(6), EH2(6), EH23(6), EH13(6), Dstab(6,6),EH12(6)
+    real(kind=8) :: disp_prev(24)
+    real(kind=8), parameter :: IDEN(6) = (/1.d0, 1.d0, 1.d0, 0.d0, 0.d0, 0.d0/)
+!
+! --------------------------------------------------------------------------------------------------
+!
+    ASSERT(nb_node .eq. 8)
+    ASSERT(nb_dof .eq. 25)
+    disp_prev = 0.d0
+!
+! - Stabilisation matrix
+!
+    Dstab      =  0.d0
+    Dstab(1,1) = +4.d0/3.d0
+    Dstab(1,2) = -2.d0/3.d0
+    Dstab(1,3) = -2.d0/3.d0
+    Dstab(2,1) = -2.d0/3.d0
+    Dstab(2,2) = +4.d0/3.d0
+    Dstab(2,3) = -2.d0/3.d0
+    Dstab(3,1) = -2.d0/3.d0
+    Dstab(3,2) = -2.d0/3.d0
+    Dstab(3,3) = +4.d0/3.d0
+    Dstab(4,4) = 1.d0
+    Dstab(5,5) = 1.d0
+    Dstab(6,6) = 1.d0
+    Dstab = Dstab*Ueff
+!
+! - Compute the deformation gradient in cartesian base
+!
+    if (l_large) then
+        call deformEcartStab(nb_node  , nb_dof,&
+                             geom_init, disp  ,&
+                             EH1      , EH2   ,&
+                             EH23     , EH13  ,EH12)
+    else
+        EH1  = matmul(BXIdev     , disp(1:3*nb_node))
+        EH2  = matmul(BETAdev    , disp(1:3*nb_node))
+        EH23 = matmul(BETAZETAdev, disp(1:3*nb_node))
+        EH13 = matmul(BXIZETAdev , disp(1:3*nb_node))
+        EH12 = matmul(BXIETAdev , disp(1:3*nb_node))
+    endif
+!
+!************************************************************
+! Les parametres sont en eux même deviatorique selon Hughes *
+! Donc il ne faut pas les deviatoriser                      *
+!*************************************************************
+! ! - Volumic part
+! !
+     aux1  = (EH1(1)+EH1(2)+EH1(3))/3.d0
+     aux2  = (EH2(1)+EH2(2)+EH2(3))/3.d0
+     aux13 = (EH13(1)+EH13(2)+EH13(3))/3.d0
+     aux23 = (EH23(1)+EH23(2)+EH23(3))/3.d0
+! !
+! ! - Deviatoric part
+! !
+     !EH1  = EH1 - aux1*IDEN
+     !EH2  = EH2 - aux2*IDEN
+     !EH13 = EH13 - aux13*IDEN
+     !EH23 = EH23 - aux23*IDEN
+!
+! - Compute stabilisation stresses
+!
+    SHXI  = matmul(Dstab, EH1)
+    SHETA  = matmul(Dstab, EH2)
+    SHXIZETA = matmul(Dstab, EH13)
+    SHETAZETA = matmul(Dstab, EH23)
+    SHXIETA = matmul(Dstab, EH12)
+!
+    !WRITE(6,*) 'Contraintes stabilisées: ',SHXI,SHETA,SHXIZETA,SHETAZETA
+!
+end subroutine

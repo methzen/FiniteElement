@@ -1,0 +1,439 @@
+! --------------------------------------------------------------------
+! Copyright (C) 1991 - 2020 - EDF R&D - www.code-aster.org
+! This file is part of code_aster.
+!
+! code_aster is free software: you can redistribute it and/or modify
+! it under the terms of the GNU General Public License as published by
+! the Free Software Foundation, either version 3 of the License, or
+! (at your option) any later version.
+!
+! code_aster is distributed in the hope that it will be useful,
+! but WITHOUT ANY WARRANTY; without even the implied warranty of
+! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+! GNU General Public License for more details.
+!
+! You should have received a copy of the GNU General Public License
+! along with code_aster.  If not, see <http://www.gnu.org/licenses/>.
+! --------------------------------------------------------------------
+! aslint: disable=W1504,W1306
+!
+subroutine nmgrsb9(BEHinteg ,&
+                   typmod   , option   , fami     ,&
+                   npg      , nb_node  , nb_dof   , lgpg,&
+                   jv_poids , jv_coopg , imate    ,&
+                   angl_naut, compor   , carcri   ,&
+                   time_prev, time_curr,&
+                   geom_init, disp_prev, disp_incr,&
+                   sigm     , vim      ,&
+                   sigp     , vip      ,&
+                   matuu    , vectu    ,&
+                   codret)
+!
+use Behaviour_type
+!
+implicit none
+!
+#include "asterf_types.h"
+#include "jeveux.h"
+#include "asterc/r8nnem.h"
+#include "asterfort/assert.h"
+#include "asterfort/shbBMatrix.h"
+#include "asterfort/codere.h"
+#include "asterfort/nmcomp.h"
+#include "asterfort/nmgeosb9.h"
+#include "asterfort/utmess.h"
+#include "asterfort/Behaviour_type.h"
+#include "asterfort/matriceBcart.h"
+#include "asterfort/nmgrtgsb9.h"
+#include "asterfort/nmgrtgstab.h"
+#include "asterfort/calculUeff.h"
+#include "asterfort/assemBsb7.h"
+#include "asterfort/mattbsb.h"
+#include "asterfort/sb9coefstab.h"
+#include "asterfort/rcvalb.h"
+!
+type(Behaviour_Integ), intent(in) :: BEHinteg
+integer, intent(in) :: npg, imate, lgpg, nb_node, nb_dof
+integer, intent(in) :: jv_poids, jv_coopg
+character(len=*), intent(in) :: fami
+character(len=8), intent(in) :: typmod(*)
+character(len=16), intent(in) :: option, compor(*)
+real(kind=8), intent(in) :: carcri(*)
+real(kind=8), intent(in) :: time_prev, time_curr
+real(kind=8), intent(in) :: geom_init(3*nb_node), disp_prev(nb_dof), disp_incr(nb_dof)
+real(kind=8), intent(in) :: angl_naut(*)
+real(kind=8), intent(in) :: sigm(6,npg), vim(lgpg,npg)
+real(kind=8), intent(out) :: sigp(6,npg), vip(lgpg,npg)
+real(kind=8), intent(out) :: matuu(*), vectu(*)
+integer, intent(out) :: codret
+!
+! --------------------------------------------------------------------------------------------------
+!
+! Solid-shell element
+!
+! Compute non-linear options for non-linear behaviours - GROT_GDEP
+!
+! --------------------------------------------------------------------------------------------------
+!
+! In  BEHinteg         : parameters for integration of behaviour
+! In  typmod           : type of modelization
+! In  option           : option to compute
+! In  fami             : Gauss family for integration point rule
+! In  npg              : number of Gauss points
+! In  nb_node          : number of nodes of element without pinch node(s)
+! In  nb_dof           : number of dof
+! In  lgpg             : length of internal state variable vector
+! In  jv_poids         : JEVEUX adress to weight of Gauss points
+! In  jv_coopg         : JEVEUX adress to coordinates of Gauss points
+! In  geom_init        : initial coordinates of element
+! In  imate            : coded material address
+! In  angl_naut        : nautical angles for anistropic material
+! In  compor           : behaviour
+! In  carcri           : parameters for behaviour
+! In  time_prev        : time at beginning of time step
+! In  time_curr        : time at end of time step
+! In  geom_init        : initial coordinates of element
+! In  disp_prev        : displacements of element at beginning of time step
+! In  disp_incr        : increment of displacements of element
+! In  disp             : displacements of element
+! In  sigm             : stresses at beginning of time step
+! In  vim              : internal state variables at beginning of time step
+! Out sigp             : stresses at end of time step
+! Out vip              : internal state variables at end of time step
+! Out vectu            : internal force vector
+! Out matuu            : tangent matrix
+! Out codret           : return code for error
+!
+! --------------------------------------------------------------------------------------------------
+!
+    integer :: i_tens, kpg,i,j,k
+    integer :: cod(npg),nbv
+    aster_logical :: l_large,sb7,sb9,l_resi,l_rigi
+    real(kind=8) :: poids, zeta, det
+    real(kind=8), dimension(6,6) :: dsidep
+    real(kind=8) :: epsg_prev(6), epsg_incr(6), epsg_curr(6), maxeps
+    real(kind=8) :: disp_curr(25)
+    real(kind=8) :: sigma(6), sigm_norm(6)
+    real(kind=8), parameter :: rac2 = sqrt(2.d0)
+    real(kind=8) :: B0(6,24), BM(6, nb_dof)
+    real(kind=8) :: u1eff, Ueff,Bstab(2,18),geom_curr(18)
+    character(len=16) :: rela_comp
+    real(kind=8) :: tBsDBs(3*nb_node,3*nb_node),eye(2,2)
+    character(len=8) :: nomres(2)
+!
+! --------------------------------------------------------------------------------------------------
+!
+    sb9=(nb_node .eq. 8).and.(nb_dof .eq. 25)
+    sb7=(nb_node .eq. 6).and.(nb_dof .eq. 19)
+    ASSERT(sb7 .or. sb9)
+    l_resi = option(1:9) .eq. 'FULL_MECA' .or. option(1:9) .eq. 'RAPH_MECA'
+    l_rigi = option(1:10) .eq. 'RIGI_MECA_' .or. option(1: 9) .eq. 'FULL_MECA'
+
+! - Material parameters for elastic stabilisation
+!
+    nomres(1) = 'E'
+    nomres(2) = 'NU'
+    nbv = 2
+!--------------
+    Bstab=0.d0
+    eye=0.d0
+    eye(1,1)=1.d0
+    eye(2,2)=1.d0
+    cod       = 0
+    u1eff     = 0.d0
+    Ueff      = 0.d0
+    disp_curr = 0.d0
+    rela_comp = compor(RELA_NAME)
+    l_large   = compor(DEFO) .eq. 'GROT_GDEP'
+!
+! - For non-linear kinematic option
+!
+    if (sb9) then
+!
+!---Initialization 
+    !B0=0.d0
+    !BXI=0.d0
+    !BETA=0.d0
+    !BZETA=0.d0
+    !BXIZETa=0.d0
+    !BETAZETA=0.d0
+    !BZETAZETA=0.d0
+! - Update displacements
+!
+    disp_curr(:) = disp_prev(:) + disp_incr(:)
+!
+! - Compute the deformation gradient in cartesian base
+!        if (option(1:4) .eq. 'RIGI') then
+!            call matriceBcart(nb_node  , geom_init,&
+!                              nb_dof   , disp_prev,&
+!                              B0       , BZETA    , BZETAZETA,&
+!                              BXI      , BETA     ,&
+!                              BXIZETA  , BETAZETA ,&
+!                              det)
+!        else 
+!            call matriceBcart(nb_node  , geom_init,&
+!                              nb_dof   , disp_curr,&
+!                              B0       , BZETA    , BZETAZETA,&
+!                              BXI      , BETA     ,&
+!                              BXIZETA  , BETAZETA ,&
+!                              det)
+!        endif
+!   
+! -     Loop on Gauss points
+!
+        Ueff=0.d0   
+        do kpg = 1, npg
+            epsg_prev(1:6) = 0.d0
+            epsg_curr(1:6) = 0.d0
+!
+            zeta  = zr(jv_coopg-1+3*kpg)
+            poids = zr(jv_poids+kpg-1)
+! --------- Compute B matrix at current Gauss point
+            !call shbBMatrix(nb_node, nb_dof   ,&
+            !                zeta   , geom_init,&
+            !                B0     , BZETA    , BZETAZETA,&
+            !                B      , B9)
+! ----------Compute Green-Lagrange strains at beginning of time step
+
+            call    nmgeosb9(l_large   ,nb_node  , nb_dof   ,&
+                              geom_init, zeta    , disp_prev,&
+                                    det, epsg_prev)
+
+            !call nmgeosb9(l_large  , &
+            !              nb_node  , nb_dof,&
+            !              geom_init, zeta  , disp_prev,&
+            !              B0       , BZETA , BZETAZETA,&
+            !              epsg_prev)
+! --    --- Add EAS effect
+            !epsg_prev    = epsg_prev + B9*disp_prev(25)
+            epsg_prev(4) = epsg_prev(4)/rac2
+            epsg_prev(5) = epsg_prev(5)/rac2
+            epsg_prev(6) = epsg_prev(6)/rac2
+            !WRITE(6,*) 'Large strains at beginning of time step: ',epsg_prev
+! --    --- Compute Green-Lagrange strains at end of time step
+!
+            call   nmgeosb9(l_large   ,nb_node  , nb_dof   ,&
+                             geom_init, zeta    , disp_curr,&
+                                   det, epsg_curr)
+            !call nmgeosb9(l_large  ,&
+            !              nb_node  , nb_dof,&
+            !              geom_init, zeta  , disp_curr,&
+            !              B0       , BZETA , BZETAZETA,&
+            !              epsg_curr)
+! --    --- Add EAS effect
+            !epsg_curr    = epsg_curr + B9*disp_curr(25)
+            epsg_curr(4) = epsg_curr(4)/rac2
+            epsg_curr(5) = epsg_curr(5)/rac2
+            epsg_curr(6) = epsg_curr(6)/rac2
+            !WRITE(6,*) 'Large strains at end of time step: ',epsg_curr
+! --    --- Prepare stresses
+            do i_tens = 1, 3
+                sigm_norm(i_tens) = sigm(i_tens,kpg)
+                sigm_norm(i_tens+3) = sigm(i_tens+3,kpg)*rac2
+            end do
+! --    --- Check "small strains"
+            maxeps = 0.d0
+            do i_tens = 1, 6
+                epsg_incr(i_tens) = epsg_curr(i_tens) - epsg_prev(i_tens)
+                maxeps            = max(maxeps, abs(epsg_incr(i_tens)))
+            end do
+            if (maxeps .gt. 0.05d0) then
+                if (rela_comp(1:4) .ne. 'ELAS') then
+                    call utmess('A', 'COMPOR2_9', sr=maxeps)
+                endif
+            endif
+! --    --- Integrate behaviour law
+            call nmcomp(BEHInteg   ,&
+                        fami       , kpg        , 1        , 3        , typmod   ,&
+                        imate      , compor     , carcri   , time_prev, time_curr,&
+                        6          , epsg_prev  , epsg_incr, 6        , sigm_norm,&
+                        vim(1, kpg), option     , angl_naut, &
+                        sigma      , vip(1, kpg), 36       , dsidep   , &
+                        cod(kpg))
+            if (cod(kpg) .eq. 1) then
+                goto 999
+            endif
+            sigm_norm(4)    = sigm_norm(4)/rac2
+            sigm_norm(5)    = sigm_norm(5)/rac2
+            sigm_norm(6)    = sigm_norm(6)/rac2
+            sigma(4)        = sigma(4)/rac2
+            sigma(5)        = sigma(5)/rac2
+            sigma(6)        = sigma(6)/rac2
+            epsg_prev(4)    = epsg_prev(4)*rac2
+            epsg_prev(5)    = epsg_prev(5)*rac2
+            epsg_prev(6)    = epsg_prev(6)*rac2
+            epsg_curr(4)    = epsg_curr(4)*rac2
+            epsg_curr(5)    = epsg_curr(5)*rac2
+            epsg_curr(6)    = epsg_curr(6)*rac2
+            dsidep(4:6,4:6) = dsidep(4:6,4:6)/2.d0
+            dsidep(4:6,1:3) = dsidep(4:6,1:3)/rac2
+            dsidep(1:3,4:6) = dsidep(1:3,4:6)/rac2
+! --    --- Compute effective shear modulus
+!            call sb9coefstab(epsg_prev ,epsg_curr,sigm_norm,&
+!                             sigma ,dsidep(5,5),poids    , u1eff) 
+!
+!            Ueff = Ueff + u1eff
+!
+!------Stabilisation elastique
+        !call rcvalb('RIGI', 1, 1, '+', imate,&
+        !           ' ', 'ELAS', 1, 'INST', [0.d0],&
+        !           nbv, nomres, para, icodre, 1)
+        !Ueff = 0.5d0*para(1)/(1+para(2))
+
+        call calculUeff(sigma-sigm_norm, epsg_curr-epsg_prev, dsidep(5,5),u1eff)
+        !call calculUeff(pk2, epsg_curr, dsidep(5,5),u1eff)
+        Ueff = Ueff + dsidep(5,5)*poids/8.d0
+
+        !print*,Ueff
+! --    --- Compute elastic matrix and linear internal force at current Gauss point
+            !call nmgrtgsb9(option   , l_large,&
+            !               nb_node  , nb_dof ,&
+            !               geom_init, zeta   ,&
+            !               det*poids, dsidep , sigma,sigm_norm, B,&
+            !               matuu    , vectu)
+!
+            call nmgrtgsb9(option   , l_large,&
+                           nb_node  , nb_dof ,&
+                           geom_init, zeta   ,&
+                           det*poids, dsidep ,&
+                           disp_curr, disp_prev,&
+                           sigma    , sigm_norm,&
+                           matuu    , vectu )
+! --    --- Compute stresses
+            if (l_resi) then
+                 do i_tens = 1, 6
+                    sigp(i_tens, kpg) = sigma(i_tens)
+                 end do
+            endif
+        end do
+! - Compute stabilization for matrix and internal force
+        !print*,'Ueff',(dsidep(4,4)+dsidep(5,5)+dsidep(6,6))/3.d0,
+        !Ueff=56500.d0
+        !call nmgrtgstab(option   , l_large  ,&
+        !                nb_node  , nb_dof   ,&
+        !                geom_init, disp_curr,disp_prev,&
+        !                det      , Ueff     ,&
+        !                BXI      , BETA     ,&
+        !                BETAZETA , BXIZETA  ,&
+        !                matuu    , vectu)
+        !print*,'Ueff',Ueff
+        call nmgrtgstab(option   , l_large,&
+                        nb_node  , nb_dof ,&
+                        geom_init, disp_curr   ,disp_prev,&
+                        Ueff     ,&
+                        matuu    , vectu)
+!=====================================================================================
+    elseif (sb7) then
+!
+!---------------------7 nodes prismatic SOLIDSHELL SB7--------------------------------
+!=====================================================================================  
+!
+!-------Loop on Gauss points
+!       
+        do i=1,3*nb_node
+            geom_curr(i)=geom_init(i)+disp_prev(i)
+        enddo      
+!
+        do kpg = 1, npg
+            !epsg_prev=r8nnem()
+            epsg_prev=0.d0
+!
+            zeta  = zr(jv_coopg-1+3*kpg)
+            poids = zr(jv_poids+kpg-1)
+!
+! ------Compute B matrix at current Gauss point
+!
+            call assemBsb7(nb_node,geom_curr,zeta,BM,Bstab,det)
+            poids=det*poids
+!
+!-------Compute small strains sb7
+!
+            epsg_incr=matmul(BM,disp_incr)
+!
+            epsg_incr(4) = epsg_incr(4)/rac2
+            epsg_incr(5) = epsg_incr(5)/rac2
+            epsg_incr(6) = epsg_incr(6)/rac2
+            !print*,'epsg_incr',epsg_incr
+!
+! --    --- Check "small strains"
+!
+            maxeps = 0.d0
+            do i_tens = 1, 6
+                maxeps= max(maxeps, abs(epsg_incr(i_tens)))
+            end do
+            if (maxeps .gt. 0.05d0) then
+                if (rela_comp(1:4) .ne. 'ELAS') then
+                    call utmess('A', 'COMPOR2_9', sr=maxeps)
+                endif
+            endif
+!
+! --    --- Prepare stresses
+!
+            do i_tens = 1, 3
+                sigm_norm(i_tens) = sigm(i_tens,kpg)
+                sigm_norm(i_tens+3) = sigm(i_tens+3,kpg)*rac2
+            end do
+!
+! --    --- Integrate behaviour law
+!
+            call nmcomp(BEHInteg   , &
+                        fami       , kpg        , 1        , 3        , typmod     ,&
+                        imate      , compor     , carcri   , time_prev, time_curr  ,&
+                        6          , epsg_prev  , epsg_incr, 6        , sigm_norm  ,&
+                        vim(1, kpg), option     , angl_naut, sigma    , vip(1, kpg),&
+                        36         , dsidep     , cod(kpg))
+            if (cod(kpg) .eq. 1) then
+                goto 999
+            endif
+!
+            sigm_norm(4)    = sigm_norm(4)/rac2
+            sigm_norm(5)    = sigm_norm(5)/rac2
+            sigm_norm(6)    = sigm_norm(6)/rac2
+            sigma(4)        = sigma(4)/rac2
+            sigma(5)        = sigma(5)/rac2
+            sigma(6)        = sigma(6)/rac2
+!
+            dsidep(4:6,4:6) = dsidep(4:6,4:6)/2.d0
+            dsidep(4:6,1:3) = dsidep(4:6,1:3)/rac2
+            dsidep(1:3,4:6) = dsidep(1:3,4:6)/rac2
+!
+! --    --- Compute elastic matrix and linear internal force at current Gauss point
+            call nmgrtgsb9(option   , l_large,&
+                           nb_node  , nb_dof ,&
+                           geom_curr, zeta   ,&
+                           poids    , dsidep ,&
+                           disp_curr, disp_prev,&
+                           sigma    , sigm_norm,&
+                           matuu    , vectu)
+!-----------Stabilization of twist mode 
+            call mattbsb(eye*dsidep(3,3)/1200.d0, 2, 3*nb_node, Bstab, tBsDBs)
+            k = 0
+            do i = 1, 3*nb_node
+                do j = 1, i
+                    k = k + 1
+                    matuu(k) = matuu(k) + poids*tBsDBs(i,j)
+                enddo
+            enddo
+            do i = 1, 3*nb_node
+                do j = 1, 3*nb_node
+                    vectu(i) = vectu(i) + tBsDBs(i,j)*disp_incr(j)*poids
+                enddo
+            enddo
+!__________________________________________________________________________________
+! --------- Compute stresses
+            if (l_resi) then
+                 do i_tens = 1, 6
+                    sigp(i_tens, kpg) = sigma(i_tens)
+                 end do
+            endif
+        end do
+!
+    endif 
+!
+999 continue
+!
+! - Return code summary
+!
+    call codere(cod, npg, codret)
+!
+end subroutine

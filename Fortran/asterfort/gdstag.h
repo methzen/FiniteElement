@@ -1,0 +1,44 @@
+! --------------------------------------------------------------------
+! Copyright (C) 1991 - 2017 - EDF R&D - www.code-aster.org
+! This file is part of code_aster.
+!
+! code_aster is free software: you can redistribute it and/or modify
+! it under the terms of the GNU General Public License as published by
+! the Free Software Foundation, either version 3 of the License, or
+! (at your option) any later version.
+!
+! code_aster is distributed in the hope that it will be useful,
+! but WITHOUT ANY WARRANTY; without even the implied warranty of
+! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+! GNU General Public License for more details.
+!
+! You should have received a copy of the GNU General Public License
+! along with code_aster.  If not, see <http://www.gnu.org/licenses/>.
+! --------------------------------------------------------------------
+
+!
+!
+interface
+    subroutine gdstag(stoudy, kp, nno, ajacob, en,&
+                      enprim, x0k, tetak, qim, qikm1,&
+                      qik, x0pg, tetag, tetapg, rotm,&
+                      rotkm1, rotk)
+        real(kind=8) :: stoudy
+        integer :: kp
+        integer :: nno
+        real(kind=8) :: ajacob
+        real(kind=8) :: en(3, 2)
+        real(kind=8) :: enprim(3, 2)
+        real(kind=8) :: x0k(3, 3)
+        real(kind=8) :: tetak(3, 3)
+        real(kind=8) :: qim(3, 3)
+        real(kind=8) :: qikm1(3, 3)
+        real(kind=8) :: qik(3, 3)
+        real(kind=8) :: x0pg(3)
+        real(kind=8) :: tetag(3)
+        real(kind=8) :: tetapg(3)
+        real(kind=8) :: rotm(3, 3)
+        real(kind=8) :: rotkm1(3, 3)
+        real(kind=8) :: rotk(3, 3)
+    end subroutine gdstag
+end interface

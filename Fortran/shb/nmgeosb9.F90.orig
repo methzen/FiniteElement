@@ -1,0 +1,101 @@
+! --------------------------------------------------------------------
+! Copyright (C) 1991 - 2020 - EDF R&D - www.code-aster.org
+! This file is part of code_aster.
+!
+! code_aster is free software: you can redistribute it and/or modify
+! it under the terms of the GNU General Public License as published by
+! the Free Software Foundation, either version 3 of the License, or
+! (at your option) any later version.
+!
+! code_aster is distributed in the hope that it will be useful,
+! but WITHOUT ANY WARRANTY; without even the implied warranty of
+! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+! GNU General Public License for more details.
+!
+! You should have received a copy of the GNU General Public License
+! along with code_aster.  If not, see <http://www.gnu.org/licenses/>.
+! --------------------------------------------------------------------
+!
+subroutine nmgeosb9(l_large  , nb_node  , nb_dof,&
+                    geom_init,    zeta  , disp  ,&
+                    det, epsi)
+!
+implicit none
+!
+#include "asterf_types.h"
+#include "asterfort/assert.h"
+#include "asterfort/deformEcart.h"
+#include "asterfort/calculB9.h"
+#include "asterfort/matriceBcart.h"
+#include "asterfort/Jacobien.h"
+#include "asterfort/matinv.h"
+!
+aster_logical, intent(in) :: l_large
+integer, intent(in) :: nb_node, nb_dof
+real(kind=8), intent(in) :: disp(nb_dof), geom_init(3*nb_node), zeta
+real(kind=8), intent(out):: epsi(6),det
+!
+! --------------------------------------------------------------------------------------------------
+!
+! Solid-shell element
+!
+! Compute Green-Lagrange or small strains
+!
+! --------------------------------------------------------------------------------------------------
+!
+! In  l_large          : flag for large strains
+! In  nb_node          : number of nodes of element without pinch node(s)
+! In  nb_dof           : number of dof
+! In  geom_init        : initial coordinates of element
+! In  disp             : displacements of element
+! In  zeta             : out-of-plane parametric component
+! In  B0               : constant part of gradient matrix
+! In  BZETA            : zeta part of gradient matrix
+! In  BZETAZETA        : zeta x zeta part of gradient matrix
+! Out epsi             : Green-Lagrange strains
+!
+! --------------------------------------------------------------------------------------------------
+!
+real(kind=8):: BXI(6, 3*nb_node), BETA(6, 3*nb_node)
+real(kind=8):: BETAZETA(6, 3*nb_node), BXIZETA(6, 3*nb_node)
+real(kind=8):: B0(6, 3*nb_node), BZETA(6, 3*nb_node)
+real(kind=8):: BZETAZETA(6, 3*nb_node),B9(6),dispm(25)
+real(kind=8) :: J0(3,3), Jm1(3,3)
+ ASSERT(nb_node .eq. 8)
+ ASSERT(nb_dof .eq. 25)
+    epsi = 0.d0
+
+! - Compute Green-Lagrange strains without EAS effect
+!
+    if (l_large) then
+! ----- Compute Green-Lagrange strains without EAS effect
+        call deformEcart(nb_node, nb_dof, geom_init, disp, (/0.d0,0.d0,zeta/),&
+                         epsi)
+    else
+        dispm=0.d0
+        call matriceBcart(nb_node  , geom_init,&
+                          nb_dof   , dispm    ,&
+                          B0       , BZETA    , BZETAZETA,&
+                          BXI      , BETA     ,&
+                          BXIZETA  , BETAZETA )
+! ----- Compute small strains without EAS effect
+        epsi = matmul((B0+BZETA*zeta+BZETAZETA*zeta*zeta), disp(1:3*nb_node))
+    endif
+!
+! - Compute component gradient for EAS effect
+!
+    call calculB9(nb_node, geom_init, zeta, B9)
+
+    epsi    = epsi + B9*disp(25)
+
+!
+! - Compute initial jacobian matrix at center of element
+!
+    call Jacobien(nb_node, geom_init, (/0.d0, 0.d0, 0.d0/), J0)
+!
+! - Inverse jacobian matrix
+!
+    call matinv('S', 3, J0, Jm1, det)
+    !WRITE(6,*) 'Jacobien: ',J0,Jm1,det
+!
+end subroutine

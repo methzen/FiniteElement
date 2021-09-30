@@ -1,0 +1,54 @@
+! --------------------------------------------------------------------
+! Copyright (C) 1991 - 2019 - EDF R&D - www.code-aster.org
+! This file is part of code_aster.
+!
+! code_aster is free software: you can redistribute it and/or modify
+! it under the terms of the GNU General Public License as published by
+! the Free Software Foundation, either version 3 of the License, or
+! (at your option) any later version.
+!
+! code_aster is distributed in the hope that it will be useful,
+! but WITHOUT ANY WARRANTY without even the implied warranty of
+! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+! GNU General Public License for more details.
+!
+! You should have received a copy of the GNU General Public License
+! along with code_aster.  If not, see <http://www.gnu.org/licenses/>.
+! --------------------------------------------------------------------
+!
+subroutine shbGetJacobianColumns(Nb_node,geom, XI ,&
+                                 J1 , J2   , J3    )
+!
+implicit none
+!
+#include "asterfort/Jacobien.h"
+integer, intent(in) :: nb_node
+real(kind=8), intent(in) :: geom(3*nb_node),XI(3)
+real(kind=8), intent(out) :: J1(3), J2(3), J3(3)
+!
+! --------------------------------------------------------------------------------------------------
+!
+! Solid-shell element
+!
+! Get columns of the jacobian in the covariant base at current point
+!
+! --------------------------------------------------------------------------------------------------
+!
+! Decomposition of jacobian:
+!   J  = J0 + xi.JXI + eta.JETA + zeta.JZETA +
+!        xi.eta.JXIETA + eta.zeta.JETAZETA + xi.zeta.JXIZETA
+!
+!   J1 = (g1 +        + h1.eta  + h3.zeta + h4.eta.zeta) . X
+!   J2 = (g2 + h1.xi  +           h2.zeta + h4.xi.zeta ) . X
+!   J3 = (g3 + h3.xi  + h2.eta            + h4.xi.eta  ) . X
+!
+! With:
+!   Ji = (d X_j / d xi_i) e_j = dN/dxi_i . X <=> J = [J1 J2 J3]
+!
+    real(kind=8) :: Jac(3,3)
+    call Jacobien(nb_node, geom, XI, Jac)
+    J1=Jac(1,1:3)
+    J2=Jac(2,1:3)
+    J3=Jac(3,1:3)
+!
+end subroutine

@@ -1,0 +1,256 @@
+! --------------------------------------------------------------------
+! Copyright (C) 1991 - 2020 - EDF R&D - www.code-aster.org
+! This file is part of code_aster.
+!
+! code_aster is free software: you can redistribute it and/or modify
+! it under the terms of the GNU General Public License as published by
+! the Free Software Foundation, either version 3 of the License, or
+! (at your option) any later version.
+!
+! code_aster is distributed in the hope that it will be useful,
+! but WITHOUT ANY WARRANTY; without even the implied warranty of
+! MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+! GNU General Public License for more details.
+!
+! You should have received a copy of the GNU General Public License
+! along with code_aster.  If not, see <http://www.gnu.org/licenses/>.
+! --------------------------------------------------------------------
+! aslint: disable=W1504, W1306
+!
+subroutine sshNLFiniteSB7(typmod   , option  , fami    ,&
+                          npg      , nb_node , nb_dof  , lgpg   ,&
+                          jv_poids , jv_coopg, jv_vf   , jv_dfde,&
+                          imate     ,&
+                          angl_naut, compor  , carcri  ,&
+                          timePrev , timeCurr,&
+                          geomInit , dispPrev, dispIncr,&
+                          sigm     , vim      ,&
+                          sigp     , vip      ,&
+                          matuu    , vectu    ,&
+                          codret)
+!
+use Behaviour_type
+use Behaviour_module
+!
+implicit none
+!
+#include "asterf_types.h"
+#include "jeveux.h"
+#include "asterfort/Behaviour_type.h"
+#include "asterfort/assert.h"
+#include "asterfort/codere.h"
+#include "asterfort/nmcomp.h"
+#include "asterfort/nbsigm.h"
+#include "asterfort/sshNLVect.h"
+#include "asterfort/sshNLMatr.h"
+#include "asterfort/sshLocalFrameSB7.h"
+#include "asterfort/sshGradMatrSB7.h"
+#include "asterfort/sshRigiGeomPtSB7.h"
+#include "asterfort/sshNLStabSB7.h"
+#include "asterfort/utmess.h"
+!
+integer, intent(in) :: npg, imate, lgpg, nb_node, nb_dof
+integer, intent(in) :: jv_poids, jv_coopg, jv_vf, jv_dfde
+character(len=*), intent(in) :: fami
+character(len=8), intent(in) :: typmod(*)
+character(len=16), intent(in) :: option, compor(*)
+real(kind=8), intent(in) :: carcri(*)
+real(kind=8), intent(in) :: timePrev, timeCurr
+real(kind=8), intent(in) :: geomInit(3*nb_node), dispPrev(nb_dof), dispIncr(nb_dof)
+real(kind=8), intent(in) :: angl_naut(*)
+real(kind=8), intent(in) :: sigm(6,npg), vim(lgpg,npg)
+real(kind=8), intent(out) :: sigp(6,npg), vip(lgpg,npg)
+real(kind=8), intent(out) :: matuu(*), vectu(*)
+integer, intent(out) :: codret
+!
+! --------------------------------------------------------------------------------------------------
+!
+! Solid-shell element - SB7
+!
+! Compute non-linear options for finite strains
+!
+! --------------------------------------------------------------------------------------------------
+!
+! In  typmod           : type of modelization
+! In  option           : option to compute
+! In  fami             : Gauss family for integration point rule
+! In  npg              : number of Gauss points
+! In  nb_node          : number of nodes of element without pinch node(s)
+! In  nb_dof           : number of dof
+! In  lgpg             : length of internal state variable vector
+! In  jv_poids         : JEVEUX adress to weight of Gauss points
+! In  jv_coopg         : JEVEUX adress to coordinates of Gauss points
+! In  geomInit         : initial coordinates of element
+! In  imate            : coded material address
+! In  angl_naut        : nautical angles for anistropic material
+! In  compor           : behaviour
+! In  carcri           : parameters for behaviour
+! Out vectu            : internal force vector
+! Out matuu            : tangent matrix
+! Out codret           : return code for error
+!
+! --------------------------------------------------------------------------------------------------
+!
+    type(Behaviour_Integ) :: BEHinteg
+    integer :: i_tens, kpg, nbsig
+    integer :: cod(npg)
+    aster_logical :: lLarge, lVect, lMatr, lMatrPred, lSigm
+    real(kind=8) :: poids, zeta, det, maxeps
+    real(kind=8), dimension(6,6) :: dsidep
+    real(kind=8) :: epsgPrev(6), epsgCurr(6), epsgIncr(6)
+    real(kind=8) :: geomCurr(18)
+    real(kind=8) :: sigmPost(6), sigmPrep(6), sigg(6)
+    real(kind=8), parameter :: rac2 = sqrt(2.d0)
+    real(kind=8) :: BXI(6,24), BETA(6,24), BZETA(6,24)
+    real(kind=8) :: B(6,19), BStab(2,18)
+    real(kind=8) :: u1eff, ueff
+    real(kind=8) :: kGeom(19, 19)
+    integer, parameter :: ndim = 3
+    real(kind=8) :: h, R(3, 3), geomLocal(18)
+!
+! --------------------------------------------------------------------------------------------------
+!
+    codret = 0
+    nbsig  = nbsigm()
+    lLarge = ASTER_TRUE
+!
+    ASSERT(nb_node .eq. 6)
+    ASSERT(nb_dof .eq. 19)
+    ASSERT(nbsig .eq. 6)
+!
+! - Initialisation of behaviour datastructure
+!
+    call behaviourInit(BEHinteg)
+!
+! - Prepare external state variables
+!
+    call behaviourPrepESVAElem(carcri  , typmod  ,&
+                               nb_node , npg     , ndim ,&
+                               jv_poids, jv_vf   , jv_dfde,&
+                               geomInit, BEHinteg)
+!
+! - Update geometry
+!
+    geomCurr  = geomInit + dispPrev
+    !WRITE(6,*) 'geomCurr  ',sum(geomCurr)
+!
+! - Compute local frame axis, local coordinates and vertices of mid_edge triangle
+!
+    call sshLocalFrameSB7(geomCurr, R, geomLocal, h)
+!
+! - Quantities to compute
+!
+    lVect     = option(1:9) .eq. 'FULL_MECA' .or. option(1:9) .eq. 'RAPH_MECA'
+    lMatr     = option(1:10) .eq. 'RIGI_MECA_' .or. option(1: 9) .eq. 'FULL_MECA'
+    lMatrPred = option(1:9) .eq. 'RIGI_MECA'
+    lSigm     = option(1:9) .eq. 'FULL_MECA' .or. option(1:9) .eq. 'RAPH_MECA'
+!
+! - Loop on Gauss points
+!
+    ueff = 0.d0
+    cod  = 0
+    do kpg = 1, npg
+        zeta  = zr(jv_coopg-1+3*kpg)
+        poids = zr(jv_poids+kpg-1)
+        !WRITE(6,*) 'Pt de Gauss: ',kpg, zeta, poids
+! ----- Compute B matrix at current Gauss point
+        call sshGradMatrSB7(nb_node, nb_dof, geomCurr, zeta,&
+                            B      , BStab , det)
+        !WRITE(6,*) 'Matrice B ',sum(B)
+        !WRITE(6,*) 'Matrice BStab ',sum(BStab)
+        !WRITE(6,*) 'Jacobien  ',det
+! ----- Compute increment of strains
+        epsgIncr = matmul(B, dispIncr)
+! ----- Compute strains at beginning of time step
+        epsgPrev = 0
+! ----- Pre-treatment of stresses and strains
+        epsgIncr(4) = epsgIncr(4)/rac2
+        epsgIncr(5) = epsgIncr(5)/rac2
+        epsgIncr(6) = epsgIncr(6)/rac2
+        do i_tens = 1, 3
+            sigmPrep(i_tens)   = sigm(i_tens,kpg)
+            sigmPrep(i_tens+3) = sigm(i_tens+3,kpg)*rac2
+        end do
+        !WRITE(6,*) 'EPSG_INCR: ',sum(epsgIncr)
+! ----- Check "small strains"
+        maxeps = 0.d0
+        do i_tens = 1, 6
+            maxeps           = max(maxeps, abs(epsgIncr(i_tens)))
+        end do
+        if (maxeps .gt. 0.05d0) then
+            call utmess('A', 'COMPOR2_9', sr = maxeps)
+        endif
+! ----- Integrate behaviour law
+        !WRITE(6,*) 'Stress before: ',sum(sigmPrep)
+        call nmcomp(BEHInteg   ,&
+                    fami       , kpg        , 1        , 3       , typmod  ,&
+                    imate      , compor     , carcri   , timePrev, timeCurr,&
+                    6          , epsgPrev   , epsgIncr , 6       , sigmPrep,&
+                    vim(1, kpg), option     , angl_naut,&
+                    sigmPost   , vip(1, kpg), 36       , dsidep  ,&
+                    cod(kpg))
+        if (cod(kpg) .eq. 1) then
+            goto 999
+        endif
+! ----- Post-treatment of stresses and matrix
+        sigmPrep(4)     = sigmPrep(4)/rac2
+        sigmPrep(5)     = sigmPrep(5)/rac2
+        sigmPrep(6)     = sigmPrep(6)/rac2
+        sigmPost(4)     = sigmPost(4)/rac2
+        sigmPost(5)     = sigmPost(5)/rac2
+        sigmPost(6)     = sigmPost(6)/rac2
+        dsidep(4:6,4:6) = dsidep(4:6,4:6)/2.d0
+        dsidep(4:6,1:3) = dsidep(4:6,1:3)/rac2
+        dsidep(1:3,4:6) = dsidep(1:3,4:6)/rac2
+        !if (lSigm) then
+        !    WRITE(6,*) 'Stress after: ',sum(sigmPost)
+        !endif
+        !WRITE(6,*) 'Matrice     : ',sum(dsidep)
+! ----- Compute effective shear modulus for stabilization
+        Ueff = dsidep(3,3)/1200.d0
+!-----  Compute stabilization for matrix and internal force
+        call sshNLStabSB7(lMatr    , lVect ,&
+                          nb_node  , nb_dof,&
+                          det*poids, Ueff  ,&
+                          dispIncr , BStab ,&
+                          matuu    , vectu)
+        !WRITE(6,*) 'Matrice après stabilisation: ',sum(matuu(1:19*19))
+! ----- Geometric part of matrix
+        if (lMatr) then
+            if (lMatrPred) then
+                sigg = sigmPost
+            else
+                sigg = sigmPrep
+            endif
+            call sshRigiGeomPtSB7(nbsig , nb_node  , nb_dof,&
+                                  h     , geomLocal, R     ,&
+                                  zeta  , sigg     ,&
+                                  kGeom)
+        endif
+! ----- Compute matrix at current Gauss point
+        if (lMatr) then
+            call sshNLMatr(nbsig    , nb_node, nb_dof,&
+                           det*poids, B      , dsidep,&
+                           matuu    , kGeom)
+        endif
+! ----- Compute internal force at current Gauss point
+        if (lVect) then
+            call sshNLVect(nbsig    , nb_node, nb_dof  ,&
+                           det*poids, B      , sigmPost,&
+                           vectu)
+        endif
+! ----- Compute stresses
+        if (lSigm) then
+            do i_tens = 1, 6
+                sigp(i_tens, kpg) = sigmPost(i_tens)
+            end do
+        endif
+    enddo
+!
+999 continue
+!
+! - Return code summary
+!
+    call codere(cod, npg, codret)
+!
+end subroutine
